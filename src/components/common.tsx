@@ -31,12 +31,12 @@ export function OpenDiscordButton({ label = "Open Discord" }: { label?: string }
 }
 
 // A bold heading with a line of explanation under it.
-export function StatusLine({ step, text }: { step: string; text: string }) {
+export function StatusLine({ step, text }: { step: string; text?: string }) {
   return (
     <PanelSectionRow>
       <div>
         <div style={{ fontWeight: "bold" }}>{step}</div>
-        <div style={{ opacity: 0.8 }}>{text}</div>
+        {text && <div style={{ opacity: 0.8 }}>{text}</div>}
       </div>
     </PanelSectionRow>
   );

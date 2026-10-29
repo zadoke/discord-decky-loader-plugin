@@ -29,6 +29,25 @@ export interface DiscordState {
   screen?: { width: number; height: number };
   // While signed out: the login page's QR link, and whether it was just scanned.
   qr?: { url: string | null; scanned: boolean } | null;
+  // Go Live is on.
+  streaming?: boolean;
+  // Screen share started from the panel (Windows), tracked by the backend.
+  share?: ShareStatus;
+}
+
+export interface ShareStatus {
+  status: "idle" | "downloading" | "starting" | "live" | "error";
+  progress?: number;
+  encoder?: string;
+  quality?: string;
+  error?: string;
+}
+
+export interface ShareSource {
+  id: string;
+  kind: "monitor" | "window";
+  label: string;
+  detail: string;
 }
 
 export interface Guild {
@@ -46,6 +65,9 @@ export const attach = callable<[], boolean>("attach");
 export const getState = callable<[], DiscordState>("get_state");
 // Python's sys.platform on the machine running Decky, e.g. "linux" or "win32".
 export const getPlatform = callable<[], string>("get_platform");
+export const shareSources = callable<[], ShareSource[]>("share_sources");
+export const shareStart = callable<[string, string], boolean>("share_start");
+export const shareStop = callable<[], boolean>("share_stop");
 
 // Runs a command inside the Discord tab (see defaults/bridge.js).
 export const command = <T = null>(name: string, args: Record<string, unknown> = {}) =>

@@ -17,6 +17,7 @@ import {
 } from "react-icons/fa";
 import { command, DiscordState, Guild, VoiceChannel } from "../backend";
 import { OpenDiscordButton, run, StatusLine } from "./common";
+import { ScreenShare } from "./ScreenShare";
 import { SignIn } from "./SignIn";
 import { useFamilyViewLocked } from "../familyView";
 import { checkLoadStall, startDiscord } from "../lifecycle";
@@ -371,6 +372,7 @@ export function VoicePanel({ state }: { state: DiscordState }) {
   return (
     <>
       <CurrentCall state={state} />
+      <ScreenShare state={state} />
       <JoinVoice currentChannelId={state.voice?.channelId} />
       <PushToTalk />
       <SignedIn state={state} />
