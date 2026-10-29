@@ -1,10 +1,10 @@
-# Discord Deck
+# Discord Deck for Windows
 
-A small [Decky Loader](https://decky.xyz) plugin that makes it easy to use Discord voice from the Steam Deck's Game Mode with just the controller: open Discord, join a voice channel, and mute or leave without touching a mouse.
+Discord voice controls for Steam Big Picture on Windows, through the unofficial Windows ports of [Decky Loader](https://decky.xyz). Join a voice channel, mute, leave and share your screen with just the controller.
+
+Fork of [brunoccst/discord-decky-loader-plugin](https://github.com/brunoccst/discord-decky-loader-plugin), which is built for the Steam Deck.
 
 It's deliberately simple. It isn't a full Discord client and there are no plans to make it one.
-
-This is a fork of [brunoccst/discord-decky-loader-plugin](https://github.com/brunoccst/discord-decky-loader-plugin) that also runs on Windows.
 
 ## Features
 
@@ -23,8 +23,8 @@ Discord stays connected in the background while you play.
 
 ## Install
 
-1. Install [Decky Loader](https://decky.xyz) on your Steam Deck.
-2. In Game Mode, open Decky's settings, turn on **Developer mode**, then go to **Developer** › **Install plugin from URL** and enter:
+1. Install Decky: one of the unofficial Windows ports on Windows, or [Decky Loader](https://decky.xyz) on a Steam Deck.
+2. In Big Picture (Game Mode on the Deck), open Decky's settings, turn on **Developer mode**, then go to **Developer** › **Install plugin from URL** and enter:
 
    ```
    https://github.com/zadoke/discord-decky-loader-plugin/releases/latest/download/discord-deck.zip
