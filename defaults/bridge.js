@@ -226,6 +226,7 @@
       voice,
       // Discord's voice connection status, e.g. RTC_CONNECTING or RTC_CONNECTED.
       rtc: store("RTCConnectionStore")?.getState?.() ?? null,
+      streaming: isStreaming(),
       mic: micStatus,
       joinError,
       screen: { width: window.screen.width, height: window.screen.height },
@@ -351,6 +352,130 @@
     };
   }
 
+  // --- Screen share relay (Windows) -------------------------------------------
+  // The backend captures the screen with ffmpeg and sends us H.264 frames. We
+  // decode them with WebCodecs into a generated video track and hand that to
+  // Discord when it asks for the screen (getDisplayMedia), which this hidden
+  // page can't do itself.
+
+  let share = null;
+
+  const newDecoder = (s, codec) => {
+    const decoder = new VideoDecoder({
+      output: (frame) => {
+        // Drop frames rather than queue them if the track is falling behind.
+        if (s.closed || s.pendingWrites > 2) return frame.close();
+        s.pendingWrites++;
+        s.writer.write(frame)
+          .then(() => { s.decoded++; })
+          .catch(() => {})
+          .finally(() => { s.pendingWrites--; });
+      },
+      error: (e) => {
+        s.error = String(e?.message ?? e);
+        s.decoder = null;
+      },
+    });
+    // "no-preference" still uses the GPU decoder when there is one, and works without.
+    decoder.configure({ codec, hardwareAcceleration: "no-preference", optimizeForLatency: true });
+    s.codec = codec;
+    s.needKey = true;
+    return decoder;
+  };
+
+  const prepareShare = () => {
+    stopShareTrack();
+    if (typeof MediaStreamTrackGenerator !== "function" || typeof VideoDecoder !== "function") {
+      throw new Error("This browser can't relay video (no WebCodecs)");
+    }
+    const generator = new MediaStreamTrackGenerator({ kind: "video" });
+    share = {
+      generator,
+      writer: generator.writable.getWriter(),
+      decoder: null,
+      codec: null,
+      needKey: true,
+      pendingWrites: 0,
+      received: 0,
+      decoded: 0,
+      error: null,
+      closed: false,
+    };
+  };
+
+  const stopShareTrack = () => {
+    const s = share;
+    share = null;
+    if (!s) return;
+    s.closed = true;
+    try { s.decoder?.close(); } catch { /* already closed */ }
+    // Closing the writer ends the source, so every clone Discord holds ends too.
+    s.writer.close().catch(() => {});
+    try { s.generator.stop(); } catch { /* already stopped */ }
+  };
+
+  const onFrame = (b64, key, ts, codec) => {
+    const s = share;
+    if (!s || s.closed) return;
+    s.received++;
+    if (!s.decoder || s.codec !== codec) {
+      try { s.decoder?.close(); } catch { /* ignore */ }
+      s.decoder = newDecoder(s, codec);
+    }
+    if (s.needKey && !key) return;
+    // Too far behind: skip ahead to the next keyframe.
+    if (!key && s.decoder.decodeQueueSize > 8) {
+      s.needKey = true;
+      return;
+    }
+    s.needKey = false;
+    const bin = atob(b64);
+    const data = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+    s.decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: ts, data }));
+  };
+
+  const originalGetDisplayMedia = navigator.mediaDevices?.getDisplayMedia?.bind(navigator.mediaDevices);
+  if (navigator.mediaDevices) {
+    navigator.mediaDevices.getDisplayMedia = async (constraints) => {
+      if (share && !share.closed) return new MediaStream([share.generator.clone()]);
+      if (originalGetDisplayMedia) return originalGetDisplayMedia(constraints);
+      throw new DOMException("Permission denied", "NotAllowedError");
+    };
+  }
+
+  const isStreaming = () => !!store("ApplicationStreamingStore")?.getCurrentUserActiveStream?.();
+
+  // Finds a function in Discord's bundle by a snippet of its source, like
+  // Vencord's findByCode.
+  const codeLookups = {};
+  const findByCode = (code) => {
+    if (codeLookups[code]) return codeLookups[code];
+    const toString = Function.prototype.toString;
+    const found = find((e) => typeof e === "function" && toString.call(e).includes(code));
+    if (found) codeLookups[code] = found;
+    return found;
+  };
+
+  // the media engine acquires a desktop source (which calls getDisplayMedia, answered above), then
+  // STREAM_START publishes it.
+  let shareSourceId = null;
+
+  const streamKey = (s) => s.guildId
+    ? `guild:${s.guildId}:${s.channelId}:${s.ownerId}`
+    : `call:${s.channelId}:${s.ownerId}`;
+
+  // Clicks through React's handlers
+  const reactClick = (el) => {
+    const key = Object.keys(el).find((k) => k.startsWith("__reactProps"));
+    const onClick = key && el[key]?.onClick;
+    if (typeof onClick === "function") {
+      onClick({ preventDefault() {}, stopPropagation() {}, currentTarget: el, target: el, type: "click" });
+    } else {
+      el.click();
+    }
+  };
+
   // --- On-screen keyboard ----------------------------------------------------
 
   document.addEventListener("focusin", (e) => {
@@ -443,6 +568,57 @@
       }
     },
 
+    prepareShare: ({ width, height } = {}) => {
+      prepareShare();
+      share.quality = { width: width ?? 1920, height: height ?? 1080 };
+    },
+
+    shareInfo: () => share && { received: share.received, decoded: share.decoded, error: share.error },
+
+    goLive: async () => {
+      if (!share) throw new Error("Screen capture is not running");
+      const channelId = currentVoiceChannelId();
+      if (!channelId) throw new Error("Join a voice channel first");
+      if (isStreaming()) return "already streaming";
+      const startStream = findByCode('"STREAM_START",streamType');
+      if (!startStream) throw new Error("Couldn't find Discord's Go Live action");
+      const guildId = store("ChannelStore")?.getChannel?.(channelId)?.guild_id ?? null;
+      const engine = store("MediaEngineStore")?.getMediaEngine?.();
+      if (engine?.getDesktopSource) {
+        const q = share.quality ?? { width: 1920, height: 1080 };
+        shareSourceId = await engine.getDesktopSource({ width: q.width, height: q.height }, true);
+        startStream(guildId, channelId, { pid: null, sourceId: shareSourceId, sourceName: null });
+        return `desktop source ${shareSourceId}`;
+      }
+      // Older bundles started capture from STREAM_START alone.
+      startStream(guildId, channelId, {});
+      return "legacy STREAM_START";
+    },
+
+    // Confirms a Go Live dialog if Discord shows one, and reports progress.
+    goLiveConfirm: () => {
+      if (isStreaming()) return { streaming: true };
+      const confirm = [...document.querySelectorAll("[role=dialog] button")]
+        .find((b) => !b.disabled && /^go live$/i.test(b.textContent?.trim() ?? ""));
+      if (confirm) reactClick(confirm);
+      return { streaming: isStreaming(), clicked: !!confirm };
+    },
+
+    stopShare: () => {
+      const active = store("ApplicationStreamingStore")?.getCurrentUserActiveStream?.();
+      const stopStream = findByCode('"STREAM_STOP"');
+      if (active && stopStream) {
+        try { stopStream(streamKey(active)); } catch (e) { console.warn("[discord-deck] STREAM_STOP failed", e); }
+      }
+      if (shareSourceId != null) {
+        try {
+          store("MediaEngineStore")?.getMediaEngine?.()?.desktopInputPool?.get?.(shareSourceId)?.destroy?.();
+        } catch { /* already gone */ }
+        shareSourceId = null;
+      }
+      stopShareTrack();
+    },
+
     // Reloads the page, e.g. for a fresh QR code or to clear a stuck captcha.
     reload: () => {
       setTimeout(() => location.reload(), 0);
@@ -455,6 +631,10 @@
   };
 
   window.__discordDeck = {
+    // Called by the backend for every video frame of a screen share.
+    frame: (b64, key, ts, codec) => {
+      try { onFrame(b64, !!key, ts, codec); } catch (e) { if (share) share.error = String(e?.message ?? e); }
+    },
     run: async (name, args) => {
       const command = commands[name];
       if (!command) throw new Error(`Unknown command: ${name}`);
