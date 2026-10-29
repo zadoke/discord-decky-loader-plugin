@@ -1,6 +1,6 @@
 {
   "name": "discord-deck",
-  "version": "1.1.0",
+  "version": "1.1.0-beta.1",
   "description": "Controller-first Discord for Steam Big Picture on Windows and Steam Deck Game Mode, as a Decky plugin",
   "type": "module",
   "scripts": {
