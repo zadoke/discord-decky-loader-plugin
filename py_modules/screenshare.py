@@ -393,3 +393,137 @@ class Capture:
                 pass
         for t in self._tasks:
             t.cancel()
+
+
+# --- Session ------------------------------------------------------------------
+
+
+class ShareSession:
+    """Screen share started from the panel.
+
+    command: runs a bridge.js command
+    post: runs JS in the page, no reply
+    on_change: status changed, update the panel
+    """
+
+    # Discord can say "not streaming" for a moment right after going live.
+    LIVE_GRACE_SECONDS = 5
+
+    def __init__(self, runtime_dir: str, logger, command, post, on_change):
+        self.ffmpeg = Ffmpeg(runtime_dir, logger)
+        self.logger = logger
+        self._command = command
+        self._post = post
+        self._on_change = on_change
+        self.status: dict = {"status": "idle"}  # idle, downloading, starting, live, error
+        self._capture: Capture | None = None
+        self._task: asyncio.Task | None = None
+        self._live_since = 0.0
+
+    async def start(self, source_id: str, quality: str) -> None:
+        if not IS_WINDOWS and not source_id.startswith("test:"):
+            raise RuntimeError("Screen sharing is only available on Windows for now")
+        # Ask the page directly: its own state pushes are throttled while hidden.
+        state = await self._command("state") or {}
+        if not (state.get("voice") or {}).get("channelId"):
+            raise RuntimeError("Join a voice channel first")
+        if self._task and not self._task.done():
+            raise RuntimeError("Screen sharing is already starting")
+        await self._stop_capture()
+        self._task = asyncio.create_task(self._run(source_id, quality))
+
+    async def stop(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+        await self._end({"status": "idle"})
+
+    async def check_stream(self, discord_state: dict) -> None:
+        """Stop if Discord ended the stream on its own, e.g. we left the call."""
+        if self.status.get("status") != "live" or discord_state.get("streaming", True):
+            return
+        if asyncio.get_running_loop().time() - self._live_since < self.LIVE_GRACE_SECONDS:
+            return
+        self.logger.info("[share] Discord stopped streaming, stopping capture")
+        await self._stop_all()
+        self.status = {"status": "idle"}  # no _set(), main.py sends the state right after
+
+    async def reset(self) -> None:
+        """Like stop(), but for when the tab is gone and there's no Discord to tell."""
+        await self._stop_capture()
+        self.status = {"status": "idle"}
+
+    async def _set(self, status: dict) -> None:
+        self.status = status
+        await self._on_change()
+
+    async def _run(self, source_id: str, quality: str) -> None:
+        try:
+            if not self.ffmpeg.available():
+                await self._set({"status": "downloading", "progress": 0})
+
+            async def progress(fraction: float):
+                await self._set({"status": "downloading", "progress": round(fraction, 2)})
+
+            await self.ffmpeg.ensure(progress)
+            encoder = self.ffmpeg.encoder
+            base = {"encoder": ENCODER_NAMES.get(encoder, encoder), "quality": quality}
+            await self._set({"status": "starting", **base})
+
+            q = QUALITIES.get(quality, QUALITIES["720p30"])
+            await self._command("prepareShare", {"width": q["height"] * 16 // 9, "height": q["height"]})
+            cmd = build_command(self.ffmpeg.path(), source_id, encoder, quality)
+            self._capture = Capture(cmd, self._send_frame, self._on_capture_exit, self.logger)
+            await self._capture.start()
+
+            # Wait until frames are being decoded on the page before going live.
+            for _ in range(40):
+                await asyncio.sleep(0.25)
+                info = await self._command("shareInfo") or {}
+                if info.get("decoded", 0) > 0:
+                    break
+                if info.get("error"):
+                    raise RuntimeError(f"Couldn't decode the video: {info['error']}")
+                if self._capture is None:
+                    return  # ffmpeg died; _on_capture_exit already reported it
+            else:
+                raise RuntimeError("No video arrived from the capture")
+
+            # Start the stream, then keep confirming Discord's dialog until it says we're live.
+            how = await self._command("goLive")
+            self.logger.info(f"[share] go live via {how}")
+            for _ in range(20):
+                await asyncio.sleep(0.5)
+                result = await self._command("goLiveConfirm") or {}
+                if result.get("streaming"):
+                    self._live_since = asyncio.get_running_loop().time()
+                    await self._set({"status": "live", **base})
+                    return
+            raise RuntimeError(f"The capture works, but Discord didn't start the stream ({how})")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.logger.exception("[share] failed to start")
+            await self._end({"status": "error", "error": str(e)})
+
+    async def _send_frame(self, b64: str, key: bool, ts: int, codec: str) -> None:
+        await self._post(f"window.__discordDeck&&__discordDeck.frame('{b64}',{1 if key else 0},{ts},'{codec}')")
+
+    async def _on_capture_exit(self, error: str) -> None:
+        self._capture = None  # already exited
+        await self._end({"status": "error", "error": f"Capture stopped: {error}"})
+
+    async def _end(self, status: dict) -> None:
+        await self._stop_all()
+        await self._set(status)
+
+    async def _stop_all(self) -> None:
+        await self._stop_capture()
+        try:
+            await self._command("stopShare")
+        except Exception as e:
+            self.logger.warning(f"[share] stopShare failed: {e}")
+
+    async def _stop_capture(self) -> None:
+        capture, self._capture = self._capture, None
+        if capture is not None:
+            await capture.stop()

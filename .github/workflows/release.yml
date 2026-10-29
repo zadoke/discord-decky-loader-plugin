@@ -32,6 +32,7 @@ jobs:
           cp dist/index.js out/discord-deck/dist/
           cp package.json plugin.json main.py LICENSE README.md out/discord-deck/
           cp -r defaults/. out/discord-deck/
+          cp -r py_modules out/discord-deck/
           cd out && zip -r discord-deck.zip discord-deck
       - uses: softprops/action-gh-release@v2
         with:

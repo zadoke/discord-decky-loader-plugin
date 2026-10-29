@@ -9,6 +9,8 @@ from pathlib import Path
 import decky
 from aiohttp import ClientSession, WSMsgType  # bundled with Decky Loader
 
+import screenshare  # lives in py_modules/
+
 # Steam's CEF exposes the DevTools protocol locally; Decky itself relies on it.
 DEVTOOLS_URL = "http://127.0.0.1:8080/json"
 # The frontend creates the hidden browser view on this URL so we can find it.
@@ -61,6 +63,13 @@ class DevToolsTab:
             return await asyncio.wait_for(future, timeout)
         finally:
             self.pending.pop(msg_id, None)
+
+    async def send_nowait(self, method: str, params: dict):
+        """Sends a command without waiting for its reply (used for video frames)."""
+        if self.ws is None or self.ws.closed:
+            raise RuntimeError("Discord tab is not connected")
+        self.next_id += 1
+        await self.ws.send_json({"id": self.next_id, "method": method, "params": params})
 
     async def evaluate(self, expression: str, timeout: float = 15):
         try:
@@ -146,6 +155,8 @@ class Plugin:
     # How far the Discord page itself got: navigated to discord.com, finished loading.
     page: dict = {}
     attach_lock: asyncio.Lock | None = None
+    # Screen sharing (Windows), see py_modules/screenshare.py.
+    screen_share: "screenshare.ShareSession | None" = None
 
     # Called by the frontend once it has created the hidden browser view.
     async def attach(self) -> bool:
@@ -200,7 +211,12 @@ class Plugin:
                     self.last_state = snapshot
             except Exception:
                 pass
-        return {"attached": self.tab is not None, "page": self.page, **self.last_state}
+        return {
+            "attached": self.tab is not None,
+            "page": self.page,
+            **self.last_state,
+            "share": self.screen_share.status,
+        }
 
     async def _on_page_event(self, method: str, params: dict):
         if method == "Page.frameNavigated":
@@ -228,6 +244,7 @@ class Plugin:
         kind = event.get("type")
         if kind == "state":
             self.last_state = event.get("state") or {}
+            await self.screen_share.check_stream(self.last_state)
             await decky.emit("state", await self.get_state())
         elif kind == "micOffer":
             await decky.emit("mic_offer", event.get("sdp"))
@@ -237,17 +254,44 @@ class Plugin:
     async def _on_tab_closed(self, tab: DevToolsTab):
         if self.tab is not tab:
             return
+        await self.screen_share.reset()
         decky.logger.warning("Discord tab connection closed")
         self.tab = None
         self.last_state = {}
         self.page = {}
         await decky.emit("tab_lost")
 
+    # --- Screen sharing (Windows) ---------------------------------------------
+
+    async def share_sources(self) -> list:
+        return screenshare.list_sources()
+
+    async def share_start(self, source_id: str, quality: str = "720p30") -> bool:
+        await self.screen_share.start(source_id, quality)
+        return True
+
+    async def share_stop(self) -> bool:
+        await self.screen_share.stop()
+        return True
+
+    async def _post(self, expression: str):
+        """Evaluates JS in the Discord tab without waiting for the result."""
+        if self.tab is not None:
+            await self.tab.send_nowait("Runtime.evaluate", {"expression": expression})
+
+    async def _push_state(self):
+        await decky.emit("state", await self.get_state())
+
     async def _main(self):
         self.attach_lock = asyncio.Lock()
+        self.screen_share = screenshare.ShareSession(
+            decky.DECKY_PLUGIN_RUNTIME_DIR, decky.logger,
+            command=self.command, post=self._post, on_change=self._push_state,
+        )
         decky.logger.info("Discord Deck backend started")
 
     async def _unload(self):
+        await self.screen_share.reset()
         if self.tab is not None:
             tab, self.tab = self.tab, None
             await tab.close()
