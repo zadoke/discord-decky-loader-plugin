@@ -4,15 +4,19 @@ A small [Decky Loader](https://decky.xyz) plugin that makes it easy to use Disco
 
 It's deliberately simple. It isn't a full Discord client and there are no plans to make it one.
 
+This is a fork of [brunoccst/discord-decky-loader-plugin](https://github.com/brunoccst/discord-decky-loader-plugin) that also runs on Windows.
+
 ## Features
 
 From the Quick Access Menu (`...` button):
 
+- Sign in by scanning a QR code shown right in the panel.
 - Join a voice channel: pick a server, then a channel.
 - See the call you're in and who's in it.
 - Mute, deafen and leave the call.
 - Push to talk on a back button (R4, R5, L4 or L5).
-- Open the full Discord page when you need it (for example to sign in).
+- Share a screen or window into the call (Windows only).
+- Open the full Discord page when you need it (not on Windows).
 - Check for updates and install them through Decky.
 
 Discord stays connected in the background while you play.
@@ -23,12 +27,18 @@ Discord stays connected in the background while you play.
 2. In Game Mode, open Decky's settings, turn on **Developer mode**, then go to **Developer** › **Install plugin from URL** and enter:
 
    ```
-   https://github.com/brunoccst/discord-decky-loader-plugin/releases/latest/download/discord-deck.zip
+   https://github.com/zadoke/discord-decky-loader-plugin/releases/latest/download/discord-deck.zip
    ```
 
-3. Open **Discord Deck** from the Quick Access Menu. The first time, tap **Sign in to Discord** and scan the QR code with the Discord app on your phone. You only need to do this once.
+3. Open **Discord Deck** from the Quick Access Menu. The first time, scan the QR code it shows with the Discord app on your phone (**Settings** › **Scan QR Code**). You only need to do this once.
 
 If your Steam account uses **Family View**, unlock it first: Discord can't open while Family View is locked, and the plugin tells you when that's the case.
+
+## Windows
+
+Works with the unofficial Windows ports of Decky, in Big Picture mode. Big Picture never shows Discord's hidden page, so the sign-in QR code is drawn in the panel and the **Open Discord** buttons are hidden.
+
+While you're in a call, **Share screen** lets you pick a monitor or window and goes live in the call. Pick 720p30, 1080p30 or 1080p60 first. The first share downloads ffmpeg (about 190 MB). It encodes on the GPU when it can (NVIDIA, AMD or Intel), otherwise on the CPU. Video only for now, no game audio.
 
 ## Updates
 
@@ -43,6 +53,7 @@ To publish a release, bump `version` in `package.json`, then run the **Release**
 | Frontend | `src/` | The Quick Access Menu panel. Creates a hidden Steam browser view for Discord, relays the microphone, and listens for the push-to-talk button. |
 | Backend | `main.py` | Connects to the hidden view over Steam's local DevTools endpoint (`127.0.0.1:8080`), loads `discord.com/app`, and passes commands and events between the panel and the page. |
 | Bridge | `defaults/bridge.js` | Runs inside the Discord page, reads Discord's own state (user, voice, channels) and triggers Discord's own voice actions. No third-party client mod is used. |
+| Screen share | `py_modules/screenshare.py` | Windows only. Captures a screen or window with ffmpeg and sends the video to the bridge, which hands it to Discord's Go Live. |
 
 Discord runs as its regular web app, loaded from discord.com each time the plugin starts. The microphone is captured by the Steam UI and relayed to the page, because Steam's hidden browser views can't open it themselves.
 
