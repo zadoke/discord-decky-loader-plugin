@@ -1,6 +1,5 @@
 import {
   ButtonItem,
-  Navigation,
   PanelSection,
   PanelSectionRow,
   ToggleField,
@@ -17,21 +16,13 @@ import {
   FaVolumeUp,
 } from "react-icons/fa";
 import { command, DiscordState, Guild, VoiceChannel } from "../backend";
-import { DISCORD_ROUTE } from "./DiscordPage";
+import { OpenDiscordButton, run, StatusLine } from "./common";
+import { SignIn } from "./SignIn";
 import { useFamilyViewLocked } from "../familyView";
 import { checkLoadStall, startDiscord } from "../lifecycle";
 import { useSecondsSince, useStartupPhase } from "../startup";
 import { applyPttSettings, loadPttSettings, PTT_BUTTONS, PttSettings } from "../pushToTalk";
-
-// Runs a bridge command; on failure shows the error and returns undefined.
-const run = async (name: string, args: Record<string, unknown> = {}) => {
-  try {
-    return await command(name, args);
-  } catch (e) {
-    toaster.toast({ title: "Discord", body: String(e) });
-    return undefined;
-  }
-};
+import { useIsWindows } from "../platform";
 
 // Waits for Discord to report the voice channel we asked for. Polled from here
 // because timers inside the hidden Discord page are throttled.
@@ -113,21 +104,6 @@ async function leaveVoice() {
   if (!(await confirmVoiceChannel(null))) {
     toaster.toast({ title: "Discord", body: "Discord didn't leave the call. Try again." });
   }
-}
-
-const openDiscord = () => {
-  Navigation.Navigate(DISCORD_ROUTE);
-  Navigation.CloseSideMenus();
-};
-
-function OpenDiscordButton({ label = "Open Discord" }: { label?: string }) {
-  return (
-    <PanelSectionRow>
-      <ButtonItem layout="below" onClick={openDiscord}>
-        {label}
-      </ButtonItem>
-    </PanelSectionRow>
-  );
 }
 
 function CurrentCall({ state }: { state: DiscordState }) {
@@ -292,18 +268,6 @@ function PushToTalk() {
   );
 }
 
-// If Discord never reports ready (e.g. its page changed), let the user open it anyway.
-function StatusLine({ step, text }: { step: string; text: string }) {
-  return (
-    <PanelSectionRow>
-      <div>
-        <div style={{ fontWeight: "bold" }}>{step}</div>
-        <div style={{ opacity: 0.8 }}>{text}</div>
-      </div>
-    </PanelSectionRow>
-  );
-}
-
 // Startup progress, one clear step at a time. Discord restarts itself once if
 // loading stalls, so the user only has to act if that also fails.
 function Starting({ state }: { state: DiscordState }) {
@@ -370,6 +334,24 @@ function FamilyViewNotice() {
   );
 }
 
+function SignedIn({ state }: { state: DiscordState }) {
+  const isWindows = useIsWindows();
+  return (
+    <PanelSection title={`Signed in as ${state.user?.name ?? ""}`}>
+      {!isWindows && (
+        <>
+          <PanelSectionRow>
+            <div style={{ opacity: 0.8 }}>
+              For anything this panel can't do yet, like text chat, open the full Discord app.
+            </div>
+          </PanelSectionRow>
+          <OpenDiscordButton label="Open full Discord" />
+        </>
+      )}
+    </PanelSection>
+  );
+}
+
 export function VoicePanel({ state }: { state: DiscordState }) {
   const familyViewLocked = useFamilyViewLocked();
   if (familyViewLocked) return <FamilyViewNotice />;
@@ -378,31 +360,14 @@ export function VoicePanel({ state }: { state: DiscordState }) {
     return <Starting state={state} />;
   }
 
-  if (!state.loggedIn) {
-    return (
-      <PanelSection title="Discord">
-        <StatusLine
-          step="Sign in needed"
-          text="Discord is ready but you're not signed in. Tap below, then scan the QR code with the Discord app on your phone. You only need to do this once."
-        />
-        <OpenDiscordButton label="Sign in to Discord" />
-      </PanelSection>
-    );
-  }
+  if (!state.loggedIn) return <SignIn state={state} />;
 
   return (
     <>
       <CurrentCall state={state} />
       <JoinVoice currentChannelId={state.voice?.channelId} />
       <PushToTalk />
-      <PanelSection title={`Signed in as ${state.user?.name ?? ""}`}>
-        <PanelSectionRow>
-          <div style={{ opacity: 0.8 }}>
-            For anything this panel can't do yet, like text chat, open the full Discord app.
-          </div>
-        </PanelSectionRow>
-        <OpenDiscordButton label="Open full Discord" />
-      </PanelSection>
+      <SignedIn state={state} />
     </>
   );
 }

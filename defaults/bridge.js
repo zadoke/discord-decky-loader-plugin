@@ -113,6 +113,68 @@
     return f.dispatch(action);
   };
 
+  // --- Sign-in QR code -------------------------------------------------------
+  // The login page's QR code encodes https://discord.com/ra/<fingerprint>. We
+  // read that link out of React's component tree (props and hook state) so the
+  // panel can draw the QR itself bc on Windows the view never shows on screen.
+
+  const REMOTE_AUTH_URL = /https:\/\/discord\.com\/ra\/[\w-]+/;
+
+  const findLink = (value, depth = 0) => {
+    if (typeof value === "string") return value.match(REMOTE_AUTH_URL)?.[0] ?? null;
+    if (depth > 2 || !value || typeof value !== "object" || value.$$typeof || value instanceof Node) {
+      return null;
+    }
+    for (const key in value) {
+      if (key === "children" || key === "_owner" || key === "return") continue;
+      let child;
+      try { child = value[key]; } catch { continue; }
+      const found = findLink(child, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const reactRoot = () => {
+    const mount = document.getElementById("app-mount");
+    if (!mount) return null;
+    const containerKey = Object.keys(mount).find((k) => k.startsWith("__reactContainer$"));
+    if (containerKey) return mount[containerKey];
+    // Older React: climb from any rendered element's fiber to the root.
+    const el = mount.querySelector("*");
+    const fiberKey = el && Object.keys(el).find((k) => k.startsWith("__reactFiber$"));
+    let fiber = fiberKey ? el[fiberKey] : null;
+    while (fiber?.return) fiber = fiber.return;
+    return fiber;
+  };
+
+  const findRemoteAuthUrl = () => {
+    const root = reactRoot();
+    if (!root) return null;
+    const stack = [root];
+    for (let visited = 0; stack.length && visited < 30000; visited++) {
+      const fiber = stack.pop();
+      let found = findLink(fiber.memoizedProps);
+      // Hooks keep their state in a linked list; class components in a plain object.
+      for (let hook = fiber.memoizedState, i = 0; !found && hook && typeof hook === "object" && i < 50; i++) {
+        found = Object.hasOwn(hook, "next") ? findLink(hook.memoizedState) : findLink(hook);
+        hook = hook.next;
+      }
+      if (found) return found;
+      if (fiber.sibling) stack.push(fiber.sibling);
+      if (fiber.child) stack.push(fiber.child);
+    }
+    return null;
+  };
+
+  const qrSnapshot = () => {
+    let url = null;
+    try { url = findRemoteAuthUrl(); } catch (e) { console.warn("[discord-deck] QR lookup failed", e); }
+    // After a scan Discord swaps the QR for "Check your phone!".
+    const scanned = /check your phone/i.test(document.body?.textContent ?? "");
+    return { url, scanned };
+  };
+
   // --- State snapshot --------------------------------------------------------
 
   const displayName = (u, fallback) => u?.globalName ?? u?.global_name ?? u?.username ?? fallback;
@@ -123,7 +185,11 @@
     if (!me) {
       // The login/QR page only loads a small bundle without UserStore, so treat it as ready.
       const onAuthPage = /^\/(login|register)\b/.test(location.pathname);
-      return { ready: onAuthPage || !!users, loggedIn: false };
+      return {
+        ready: onAuthPage || !!users,
+        loggedIn: false,
+        qr: onAuthPage ? qrSnapshot() : null,
+      };
     }
 
     const selected = store("SelectedChannelStore");
@@ -375,6 +441,11 @@
       for (const conn of connections.values ? connections.values() : connections) {
         conn?.setForceAudioInput?.(!!pressed);
       }
+    },
+
+    // Reloads the page, e.g. for a fresh QR code or to clear a stuck captcha.
+    reload: () => {
+      setTimeout(() => location.reload(), 0);
     },
 
     micAnswer: ({ sdp, error }) => {

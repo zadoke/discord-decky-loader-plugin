@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 # The decky plugin module is located at decky-loader/plugin
@@ -14,6 +15,11 @@ DEVTOOLS_URL = "http://127.0.0.1:8080/json"
 BOOT_URL = "data:text/plain,discord-deck-boot"
 DISCORD_URL = "https://discord.com/app"
 BINDING = "discordDeckEmit"
+IS_WINDOWS = sys.platform == "win32"
+# On Windows, Big Picture doesn't draw the hidden view and display scaling makes
+# Discord's page too narrow to show its QR panel, so lay the page out at a fixed
+# desktop size instead. The panel then shows the QR code itself.
+WINDOWS_VIEWPORT = {"width": 1280, "height": 800, "deviceScaleFactor": 1, "mobile": False}
 
 
 def bridge_source() -> str:
@@ -67,7 +73,9 @@ class DevToolsTab:
             raise RuntimeError("Discord didn't respond in time") from None
         if "exceptionDetails" in res:
             details = res["exceptionDetails"]
-            message = details.get("exception", {}).get("description") or details.get("text")
+            message = details.get("exception", {}).get("description") or details.get("text") or ""
+            # Keep the first line only (no JS stack trace), minus the "Error: " prefix.
+            message = message.split("\n")[0].removeprefix("Uncaught ").removeprefix("Error: ")
             raise RuntimeError(message)
         return res.get("result", {}).get("value")
 
@@ -160,6 +168,11 @@ class Plugin:
                     "runImmediately": True,
                 })
                 await keep_page_focused(tab)
+                if IS_WINDOWS:
+                    try:
+                        await tab.send("Emulation.setDeviceMetricsOverride", WINDOWS_VIEWPORT)
+                    except Exception as e:
+                        decky.logger.warning(f"Emulation.setDeviceMetricsOverride failed: {e}")
                 self.tab = tab
                 await tab.send("Page.navigate", {"url": DISCORD_URL})
             except Exception:
@@ -169,13 +182,17 @@ class Plugin:
             decky.logger.info("Discord tab attached")
             return True
 
+    async def get_platform(self) -> str:
+        return sys.platform
+
     async def get_version(self) -> str:
         return decky.DECKY_PLUGIN_VERSION
 
     async def get_state(self) -> dict:
-        # Until Discord reports ready, ask the page directly instead of waiting
-        # for its own (throttled, since the view is hidden) state push.
-        if self.tab is not None and not self.last_state.get("ready"):
+        # Until Discord reports ready and signed in, ask the page directly instead
+        # of waiting for its own (throttled, since the view is hidden) state push.
+        # While signed out this also picks up the sign-in QR code as it changes.
+        if self.tab is not None and not (self.last_state.get("ready") and self.last_state.get("loggedIn")):
             try:
                 snapshot = await self.tab.evaluate(
                     "window.__discordDeck ? window.__discordDeck.run('state') : null", timeout=3)

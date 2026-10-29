@@ -27,6 +27,8 @@ export interface DiscordState {
   joinError?: string | null;
   mic?: { status: "idle" | "requesting" | "ok" | "failed"; error?: string };
   screen?: { width: number; height: number };
+  // While signed out: the login page's QR link, and whether it was just scanned.
+  qr?: { url: string | null; scanned: boolean } | null;
 }
 
 export interface Guild {
@@ -42,6 +44,8 @@ export interface VoiceChannel {
 
 export const attach = callable<[], boolean>("attach");
 export const getState = callable<[], DiscordState>("get_state");
+// Python's sys.platform on the machine running Decky, e.g. "linux" or "win32".
+export const getPlatform = callable<[], string>("get_platform");
 
 // Runs a command inside the Discord tab (see defaults/bridge.js).
 export const command = <T = null>(name: string, args: Record<string, unknown> = {}) =>
@@ -49,7 +53,8 @@ export const command = <T = null>(name: string, args: Record<string, unknown> = 
 
 export function useDiscordState() {
   const [state, setState] = useState<DiscordState>({ attached: false });
-  const waiting = !state.attached || !state.ready;
+  // Also poll while signed out, so the sign-in QR code stays current.
+  const waiting = !state.attached || !state.ready || !state.loggedIn;
 
   // Pushed "state" events can be missed while the panel is open, so poll
   // until Discord is ready; reopening the panel did the same by hand.
