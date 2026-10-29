@@ -3,7 +3,7 @@ import { callable, fetchNoCors } from "@decky/api";
 // Updates come from this repo's GitHub releases and are installed through
 // Decky's own installer, which shows its usual confirmation prompt.
 const RELEASES_URL =
-  "https://api.github.com/repos/brunoccst/discord-decky-loader-plugin/releases?per_page=10";
+  "https://api.github.com/repos/zadoke/discord-decky-loader-plugin/releases?per_page=10";
 const ASSET_NAME = "discord-deck.zip";
 const PLUGIN_NAME = "Discord Deck"; // must match plugin.json
 const INSTALL_TYPE_UPDATE = 2;
