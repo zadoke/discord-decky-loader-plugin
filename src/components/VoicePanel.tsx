@@ -127,6 +127,12 @@ function CurrentCall({ state }: { state: DiscordState }) {
           <div>Connecting to voice…</div>
         </PanelSectionRow>
       )}
+      {state.muted && state.mic?.status === "failed" && (
+        <StatusLine
+          step="No microphone"
+          text={`Discord couldn't get a microphone, so it keeps you muted. Plug one in, then tap Unmute. ${state.mic.error ?? ""}`.trim()}
+        />
+      )}
       <PanelSectionRow>
         <ButtonItem layout="below" onClick={() => run("toggleMute")}>
           {state.muted ? <><FaMicrophoneSlash /> Unmute</> : <><FaMicrophone /> Mute</>}
