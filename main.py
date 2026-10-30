@@ -64,13 +64,6 @@ class DevToolsTab:
         finally:
             self.pending.pop(msg_id, None)
 
-    async def send_nowait(self, method: str, params: dict):
-        """Sends a command without waiting for its reply (used for video frames)."""
-        if self.ws is None or self.ws.closed:
-            raise RuntimeError("Discord tab is not connected")
-        self.next_id += 1
-        await self.ws.send_json({"id": self.next_id, "method": method, "params": params})
-
     async def evaluate(self, expression: str, timeout: float = 15):
         try:
             res = await self.send("Runtime.evaluate", {
@@ -274,11 +267,6 @@ class Plugin:
         await self.screen_share.stop()
         return True
 
-    async def _post(self, expression: str):
-        """Evaluates JS in the Discord tab without waiting for the result."""
-        if self.tab is not None:
-            await self.tab.send_nowait("Runtime.evaluate", {"expression": expression})
-
     async def _push_state(self):
         await decky.emit("state", await self.get_state())
 
@@ -286,7 +274,7 @@ class Plugin:
         self.attach_lock = asyncio.Lock()
         self.screen_share = screenshare.ShareSession(
             decky.DECKY_PLUGIN_RUNTIME_DIR, decky.logger,
-            command=self.command, post=self._post, on_change=self._push_state,
+            command=self.command, on_change=self._push_state,
         )
         decky.logger.info("Discord Deck backend started")
 

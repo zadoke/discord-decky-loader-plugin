@@ -353,8 +353,8 @@
   }
 
   // --- Screen share relay (Windows) -------------------------------------------
-  // The backend captures the screen with ffmpeg and sends us H.264 frames. We
-  // decode them with WebCodecs into a generated video track and hand that to
+  // The backend captures the screen with ffmpeg and sends us H.264 frames over
+  // a local websocket (see FrameRelay in screenshare.py). We decode them with WebCodecs into a generated video track and hand that to
   // Discord when it asks for the screen (getDisplayMedia), which this hidden
   // page can't do itself.
 
@@ -383,17 +383,19 @@
     return decoder;
   };
 
-  const prepareShare = () => {
+  const prepareShare = (url) => {
     stopShareTrack();
     if (typeof MediaStreamTrackGenerator !== "function" || typeof VideoDecoder !== "function") {
       throw new Error("This browser can't relay video (no WebCodecs)");
     }
     const generator = new MediaStreamTrackGenerator({ kind: "video" });
-    share = {
+    const s = {
       generator,
       writer: generator.writable.getWriter(),
+      socket: new WebSocket(url),
       decoder: null,
-      codec: null,
+      codec: null, // decoder's
+      streamCodec: null, // backend's
       needKey: true,
       pendingWrites: 0,
       received: 0,
@@ -401,6 +403,15 @@
       error: null,
       closed: false,
     };
+    s.socket.binaryType = "arraybuffer";
+    s.socket.onmessage = (e) => {
+      if (typeof e.data === "string") {
+        s.streamCodec = e.data;
+        return;
+      }
+      try { onFrame(s, e.data); } catch (err) { s.error = String(err?.message ?? err); }
+    };
+    share = s;
   };
 
   const stopShareTrack = () => {
@@ -408,20 +419,23 @@
     share = null;
     if (!s) return;
     s.closed = true;
+    s.socket.close();
     try { s.decoder?.close(); } catch { /* already closed */ }
     // Closing the writer ends the source, so every clone Discord holds ends too.
     s.writer.close().catch(() => {});
     try { s.generator.stop(); } catch { /* already stopped */ }
   };
 
-  const onFrame = (b64, key, ts, codec) => {
-    const s = share;
-    if (!s || s.closed) return;
+  // buf: key flag (1 byte) + timestamp (f64 LE) + frame
+  const onFrame = (s, buf) => {
+    if (s.closed || !s.streamCodec) return;
     s.received++;
-    if (!s.decoder || s.codec !== codec) {
+    if (!s.decoder || s.codec !== s.streamCodec) {
       try { s.decoder?.close(); } catch { /* ignore */ }
-      s.decoder = newDecoder(s, codec);
+      s.decoder = newDecoder(s, s.streamCodec);
     }
+    const header = new DataView(buf, 0, 9);
+    const key = header.getUint8(0) === 1;
     if (s.needKey && !key) return;
     // Too far behind: skip ahead to the next keyframe.
     if (!key && s.decoder.decodeQueueSize > 8) {
@@ -429,10 +443,11 @@
       return;
     }
     s.needKey = false;
-    const bin = atob(b64);
-    const data = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
-    s.decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: ts, data }));
+    s.decoder.decode(new EncodedVideoChunk({
+      type: key ? "key" : "delta",
+      timestamp: header.getFloat64(1, true),
+      data: new Uint8Array(buf, 9),
+    }));
   };
 
   const originalGetDisplayMedia = navigator.mediaDevices?.getDisplayMedia?.bind(navigator.mediaDevices);
@@ -568,8 +583,8 @@
       }
     },
 
-    prepareShare: ({ width, height } = {}) => {
-      prepareShare();
+    prepareShare: ({ width, height, url } = {}) => {
+      prepareShare(url);
       share.quality = { width: width ?? 1920, height: height ?? 1080 };
     },
 
@@ -631,10 +646,6 @@
   };
 
   window.__discordDeck = {
-    // Called by the backend for every video frame of a screen share.
-    frame: (b64, key, ts, codec) => {
-      try { onFrame(b64, !!key, ts, codec); } catch (e) { if (share) share.error = String(e?.message ?? e); }
-    },
     run: async (name, args) => {
       const command = commands[name];
       if (!command) throw new Error(`Unknown command: ${name}`);

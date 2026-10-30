@@ -3,20 +3,23 @@
 Steam's UI isn't allowed to capture the screen, so we capture it outside the
 browser: ffmpeg grabs a window or monitor with Windows Graphics Capture
 (gfxcapture), encodes it to H.264 on the GPU when it can (NVENC, AMF, Quick
-Sync, else x264), and we pass each encoded frame to the Discord page. There
-bridge.js decodes it with WebCodecs and hands Discord a normal video track when
-it asks to share the screen.
+Sync, else x264), and we send each encoded frame to the Discord page over a
+local websocket. There bridge.js decodes it with WebCodecs and hands Discord a
+normal video track when it asks to share the screen.
 """
 
 import asyncio
-import base64
 import ctypes
 import os
+import secrets
 import shutil
+import struct
 import sys
 import time
 import zipfile
 from pathlib import Path
+
+from aiohttp import web
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -325,8 +328,67 @@ class AnnexBSplitter:
 # --- A running share ----------------------------------------------------------
 
 
+class FrameRelay:
+    """Websocket the page pulls frames from. discord's CSP allows 127.0.0.1.
+
+    binary: key flag (1 byte) + timestamp (f64 LE, us) + frame
+    text: codec, whenever it changes
+    """
+
+    def __init__(self):
+        self._token = secrets.token_urlsafe(16)
+        self._runner: web.AppRunner | None = None
+        self._ws: web.WebSocketResponse | None = None
+        self._connected = asyncio.Event()
+        self._codec: str | None = None
+
+    async def start(self) -> str:
+        """Returns the url for the page."""
+        app = web.Application()
+        app.router.add_get("/", self._handle)
+        self._runner = web.AppRunner(app, access_log=None)
+        await self._runner.setup()
+        await web.TCPSite(self._runner, "127.0.0.1", 0).start()
+        port = self._runner.addresses[0][1]
+        return f"ws://127.0.0.1:{port}/?token={self._token}"
+
+    async def wait_connected(self, timeout: float) -> None:
+        try:
+            await asyncio.wait_for(self._connected.wait(), timeout)
+        except asyncio.TimeoutError:
+            raise RuntimeError("The Discord page couldn't connect to the capture") from None
+
+    async def _handle(self, request: web.Request):
+        # token so other local pages can't connect
+        if request.query.get("token") != self._token or self._ws is not None:
+            return web.Response(status=403)
+        # h264 doesn't compress, don't waste cpu on deflate
+        ws = web.WebSocketResponse(compress=False)
+        await ws.prepare(request)
+        self._ws = ws
+        self._connected.set()
+        async for _ in ws:  # page never sends anything
+            pass
+        return ws
+
+    async def send(self, au: bytes, key: bool, ts: int, codec: str) -> None:
+        ws = self._ws
+        if ws is None or ws.closed:
+            return  # page is gone, tab-closed cleans up
+        if codec != self._codec:
+            self._codec = codec
+            await ws.send_str(codec)
+        await ws.send_bytes(struct.pack("<Bd", 1 if key else 0, ts) + au)
+
+    async def stop(self) -> None:
+        if self._ws is not None:
+            await self._ws.close()
+        if self._runner is not None:
+            await self._runner.cleanup()
+
+
 class Capture:
-    """One ffmpeg process, feeding frames to `send_frame(b64, key, ts, codec)`."""
+    """Runs ffmpeg, frames go to send_frame."""
 
     def __init__(self, cmd: list[str], send_frame, on_exit, logger):
         self.cmd = cmd
@@ -366,7 +428,7 @@ class Capture:
                         continue
                     ts = int((time.monotonic() - self.started) * 1_000_000)
                     self.frames += 1
-                    await self.send_frame(base64.b64encode(au).decode("ascii"), key, ts, splitter.codec)
+                    await self.send_frame(au, key, ts, splitter.codec)
         except Exception:
             self.logger.exception("[share] frame relay failed")
         finally:
@@ -402,20 +464,19 @@ class ShareSession:
     """Screen share started from the panel.
 
     command: runs a bridge.js command
-    post: runs JS in the page, no reply
     on_change: status changed, update the panel
     """
 
     # Discord can say "not streaming" for a moment right after going live.
     LIVE_GRACE_SECONDS = 5
 
-    def __init__(self, runtime_dir: str, logger, command, post, on_change):
+    def __init__(self, runtime_dir: str, logger, command, on_change):
         self.ffmpeg = Ffmpeg(runtime_dir, logger)
         self.logger = logger
         self._command = command
-        self._post = post
         self._on_change = on_change
         self.status: dict = {"status": "idle"}  # idle, downloading, starting, live, error
+        self._relay: FrameRelay | None = None
         self._capture: Capture | None = None
         self._task: asyncio.Task | None = None
         self._live_since = 0.0
@@ -470,9 +531,14 @@ class ShareSession:
             await self._set({"status": "starting", **base})
 
             q = QUALITIES.get(quality, QUALITIES["720p30"])
-            await self._command("prepareShare", {"width": q["height"] * 16 // 9, "height": q["height"]})
+            self._relay = FrameRelay()
+            url = await self._relay.start()
+            await self._command("prepareShare", {
+                "width": q["height"] * 16 // 9, "height": q["height"], "url": url,
+            })
+            await self._relay.wait_connected(5)
             cmd = build_command(self.ffmpeg.path(), source_id, encoder, quality)
-            self._capture = Capture(cmd, self._send_frame, self._on_capture_exit, self.logger)
+            self._capture = Capture(cmd, self._relay.send, self._on_capture_exit, self.logger)
             await self._capture.start()
 
             # Wait until frames are being decoded on the page before going live.
@@ -505,9 +571,6 @@ class ShareSession:
             self.logger.exception("[share] failed to start")
             await self._end({"status": "error", "error": str(e)})
 
-    async def _send_frame(self, b64: str, key: bool, ts: int, codec: str) -> None:
-        await self._post(f"window.__discordDeck&&__discordDeck.frame('{b64}',{1 if key else 0},{ts},'{codec}')")
-
     async def _on_capture_exit(self, error: str) -> None:
         self._capture = None  # already exited
         await self._end({"status": "error", "error": f"Capture stopped: {error}"})
@@ -527,3 +590,6 @@ class ShareSession:
         capture, self._capture = self._capture, None
         if capture is not None:
             await capture.stop()
+        relay, self._relay = self._relay, None
+        if relay is not None:
+            await relay.stop()
