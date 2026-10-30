@@ -39,10 +39,11 @@ ENCODER_NAMES = {
     "libx264": "CPU (x264)",
 }
 
+# loopback only and discord re-encodes it, so high bitrate
 QUALITIES = {
-    "720p30": {"height": 720, "fps": 30, "bitrate": "4500k"},
-    "1080p30": {"height": 1080, "fps": 30, "bitrate": "8000k"},
-    "1080p60": {"height": 1080, "fps": 60, "bitrate": "12000k"},
+    "720p30": {"height": 720, "fps": 30, "bitrate": "12000k"},
+    "1080p30": {"height": 1080, "fps": 30, "bitrate": "20000k"},
+    "1080p60": {"height": 1080, "fps": 60, "bitrate": "30000k"},
 }
 
 
